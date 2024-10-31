@@ -1,0 +1,110 @@
+From 5332ff840f5fee2abc1afbfe227b41d05e4fc500 Mon Sep 17 00:00:00 2001
+From: Lennart Poettering <lennart@poettering.net>
+Date: Mon, 31 Aug 2020 19:37:13 +0200
+Subject: [PATCH OL7 1/2] pager: set $LESSSECURE whenver we invoke a pager
+
+Some extra safety when invoked via "sudo". With this we address a
+genuine design flaw of sudo, and we shouldn't need to deal with this.
+But it's still a good idea to disable this surface given how exotic it
+is.
+
+Prompted by #5666
+
+(cherry picked from commit 612ebf6c913dd0e4197c44909cb3157f5c51a2f0)
+
+Related: RHEL-35665
+Reviewed-by: Laurence Rochfort <laurence.rochfort@oracle.com>
+Signed-off-by: Ronan Pigott <ronan.pigott@oracle.com>
+---
+ man/less-variables.xml | 10 ++++++++++
+ man/systemctl.xml      |  1 +
+ man/systemd.xml        |  2 ++
+ src/shared/pager.c     | 20 ++++++++++++++++++++
+ 4 files changed, 33 insertions(+)
+
+diff --git a/man/less-variables.xml b/man/less-variables.xml
+index 0fb4d7fbcf9f..e68de5465f1b 100644
+--- a/man/less-variables.xml
++++ b/man/less-variables.xml
+@@ -25,5 +25,15 @@
+                         <command>less</command>
+                         (<literal>FRSXMK</literal>).</para></listitem>
+                 </varlistentry>
++
++                <varlistentry id='lesssecure'>
++                        <term><varname>$SYSTEMD_LESSSECURE</varname></term>
++
++                        <listitem><para>Takes a boolean argument. Overrides the <varname>$LESSSECURE</varname> environment
++                        variable when invoking the pager, which controls the "secure" mode of less (which disables commands
++                        such as <literal>|</literal> which allow to easily shell out to external command lines). By default
++                        less secure mode is enabled, with this setting it may be disabled.</para></listitem>
++                </varlistentry>
++
+         </variablelist>
+ </refsect1>
+diff --git a/man/systemctl.xml b/man/systemctl.xml
+index 4a1aff227341..ae96b9cf06a6 100644
+--- a/man/systemctl.xml
++++ b/man/systemctl.xml
+@@ -1716,6 +1716,7 @@ kobject-uevent 1 systemd-udevd-kernel.socket systemd-udevd.service
+     </variablelist>
+     <xi:include href="less-variables.xml" xpointer="pager"/>
+     <xi:include href="less-variables.xml" xpointer="less"/>
++    <xi:include href="less-variables.xml" xpointer="lesssecure"/>
+   </refsect1>
+ 
+   <refsect1>
+diff --git a/man/systemd.xml b/man/systemd.xml
+index 30005b1ef213..035d64122cfa 100644
+--- a/man/systemd.xml
++++ b/man/systemd.xml
+@@ -761,6 +761,8 @@
+         </para></listitem>
+       </varlistentry>
+ 
++      <xi:include href="less-variables.xml" xpointer="lesssecure"/>
++
+       <varlistentry>
+         <term><varname>$LISTEN_PID</varname></term>
+         <term><varname>$LISTEN_FDS</varname></term>
+diff --git a/src/shared/pager.c b/src/shared/pager.c
+index 8635d9a600dd..307ae683a3cc 100644
+--- a/src/shared/pager.c
++++ b/src/shared/pager.c
+@@ -26,6 +26,7 @@
+ #include <string.h>
+ #include <sys/prctl.h>
+ 
++#include "env-util.h"
+ #include "pager.h"
+ #include "util.h"
+ #include "macro.h"
+@@ -103,6 +104,25 @@ int pager_open(bool jump_to_end) {
+                 if (getppid() != parent_pid)
+                         _exit(EXIT_SUCCESS);
+ 
++                /* People might invoke us from sudo, don't needlessly allow less to be a way to shell out
++                 * privileged stuff. */
++                r = getenv_bool("SYSTEMD_LESSSECURE");
++                if (r == 0) { /* Remove env var if off */
++                        if (unsetenv("LESSSECURE") < 0) {
++                                log_error_errno(errno, "Failed to uset environment variable LESSSECURE: %m");
++                                _exit(EXIT_FAILURE);
++                        }
++                } else {
++                        /* Set env var otherwise */
++                        if (r < 0)
++                                log_warning_errno(r, "Unable to parse $SYSTEMD_LESSSECURE, ignoring: %m");
++
++                        if (setenv("LESSSECURE", "1", 1) < 0) {
++                                log_error_errno(errno, "Failed to set environment variable LESSSECURE: %m");
++                                _exit(EXIT_FAILURE);
++                        }
++                }
++
+                 if (pager) {
+                         execlp(pager, pager, NULL);
+                         execl("/bin/sh", "sh", "-c", pager, NULL);
+-- 
+1.8.3.1
+

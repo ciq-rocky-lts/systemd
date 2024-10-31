@@ -1,0 +1,216 @@
+From 974821e4feda71436b907d0117cc5b49d035b19c Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?Zbigniew=20J=C4=99drzejewski-Szmek?= <zbyszek@in.waw.pl>
+Date: Wed, 7 Oct 2020 11:15:05 +0200
+Subject: [PATCH OL7 2/2] pager: make pager secure when under euid is changed
+ or explicitly requested
+
+The variable is renamed to SYSTEMD_PAGERSECURE (because it's not just about
+less now), and we automatically enable secure mode in certain cases, but not
+otherwise.
+
+This approach is more nuanced, but should provide a better experience for
+users:
+
+- Previusly we would set LESSSECURE=1 and trust the pager to make use of
+  it. But this has an effect only on less. We need to not start pagers which
+  are insecure when in secure mode. In particular more is like that and is a
+  very popular pager.
+
+- We don't enable secure mode always, which means that those other pagers can
+  reasonably used.
+
+- We do the right thing by default, but the user has ultimate control by
+  setting SYSTEMD_PAGERSECURE.
+
+Fixes #5666.
+
+v2:
+- also check $PKEXEC_UID
+
+v3:
+- use 'sd_pid_get_owner_uid() != geteuid()' as the condition
+
+Based on: 0a42426d797406b4b01a0d9c13bb759c2629d108
+
+rhel-only
+
+Resolves: RHEL-35665
+Reviewed-by: Laurence Rochfort <laurence.rochfort@oracle.com>
+Signed-off-by: Ronan Pigott <ronan.pigott@oracle.com>
+---
+ man/less-variables.xml | 28 ++++++++++++++---
+ src/shared/pager.c     | 85 +++++++++++++++++++++++++++++++++++---------------
+ 2 files changed, 82 insertions(+), 31 deletions(-)
+
+diff --git a/man/less-variables.xml b/man/less-variables.xml
+index e68de5465f1b..942ce02cc1e5 100644
+--- a/man/less-variables.xml
++++ b/man/less-variables.xml
+@@ -27,12 +27,30 @@
+                 </varlistentry>
+ 
+                 <varlistentry id='lesssecure'>
+-                        <term><varname>$SYSTEMD_LESSSECURE</varname></term>
++                        <term><varname>$SYSTEMD_PAGERSECURE</varname></term>
+ 
+-                        <listitem><para>Takes a boolean argument. Overrides the <varname>$LESSSECURE</varname> environment
+-                        variable when invoking the pager, which controls the "secure" mode of less (which disables commands
+-                        such as <literal>|</literal> which allow to easily shell out to external command lines). By default
+-                        less secure mode is enabled, with this setting it may be disabled.</para></listitem>
++                        <listitem><para>Takes a boolean argument. When true, the "secure" mode of the pager is enabled; if
++                        false, disabled. If <varname>$SYSTEMD_PAGERSECURE</varname> is not set at all, secure mode is enabled
++                        if the effective UID is not the same as the owner of the login session, see <citerefentry
++                        project='man-pages'><refentrytitle>geteuid</refentrytitle><manvolnum>2</manvolnum></citerefentry> and
++                        <citerefentry><refentrytitle>sd_pid_get_owner_uid</refentrytitle><manvolnum>3</manvolnum></citerefentry>.
++                        In secure mode, <option>LESSSECURE=1</option> will be set when invoking the pager, and the pager shall
++                        disable commands that open or create new files or start new subprocesses. When
++                        <varname>$SYSTEMD_PAGERSECURE</varname> is not set at all, pagers which are not known to implement
++                        secure mode will not be used. (Currently only
++                        <citerefentry><refentrytitle>less</refentrytitle><manvolnum>1</manvolnum></citerefentry> implements
++                        secure mode.)</para>
++
++                        <para>Note: when commands are invoked with elevated privileges, for example under <citerefentry
++                        project='man-pages'><refentrytitle>sudo</refentrytitle><manvolnum>8</manvolnum></citerefentry> or
++                        <citerefentry
++                        project='die-net'><refentrytitle>pkexec</refentrytitle><manvolnum>1</manvolnum></citerefentry>, care
++                        must be taken to ensure that unintended interactive features are not enabled. "Secure" mode for the
++                        pager may be enabled automatically as describe above. Setting <varname>SYSTEMD_PAGERSECURE=0</varname>
++                        or not removing it from the inherited environment allows the user to invoke arbitrary commands. Note
++                        that if the <varname>$SYSTEMD_PAGER</varname> or <varname>$PAGER</varname> variables are to be
++                        honoured, <varname>$SYSTEMD_PAGERSECURE</varname> must be set too. It might be reasonable to completly
++                        disable the pager using <option>--no-pager</option> instead.</para></listitem>
+                 </varlistentry>
+ 
+         </variablelist>
+diff --git a/src/shared/pager.c b/src/shared/pager.c
+index 307ae683a3cc..b75ca5da59b5 100644
+--- a/src/shared/pager.c
++++ b/src/shared/pager.c
+@@ -26,10 +26,13 @@
+ #include <string.h>
+ #include <sys/prctl.h>
+ 
++#include "cgroup-util.h" /* cg_pid_get_owner_uid() */
++
+ #include "env-util.h"
+ #include "pager.h"
+ #include "util.h"
+ #include "macro.h"
++#include "strv.h"
+ 
+ static pid_t pager_pid = 0;
+ 
+@@ -48,6 +51,16 @@ noreturn static void pager_fallback(void) {
+         _exit(EXIT_SUCCESS);
+ }
+ 
++/* Custom wrapper replacing sd_pid_get_owner_uid() from sd-login.h
++ * added to avoid having to include sd-login.h that causes linking problems */
++static int pg_pid_get_owner_uid(pid_t pid, uid_t *uid) {
++
++        assert_return(pid >= 0, -EINVAL);
++        assert_return(uid, -EINVAL);
++
++        return cg_pid_get_owner_uid(pid, uid);
++}
++
+ int pager_open(bool jump_to_end) {
+         int fd[2];
+         const char *pager;
+@@ -83,7 +96,9 @@ int pager_open(bool jump_to_end) {
+ 
+         /* In the child start the pager */
+         if (pager_pid == 0) {
+-                const char* less_opts;
++                const char* less_opts, *exe;
++                int use_secure_mode;
++                bool trust_pager;
+ 
+                 dup2(fd[0], STDIN_FILENO);
+                 safe_close_pair(fd);
+@@ -105,39 +120,57 @@ int pager_open(bool jump_to_end) {
+                         _exit(EXIT_SUCCESS);
+ 
+                 /* People might invoke us from sudo, don't needlessly allow less to be a way to shell out
+-                 * privileged stuff. */
+-                r = getenv_bool("SYSTEMD_LESSSECURE");
+-                if (r == 0) { /* Remove env var if off */
+-                        if (unsetenv("LESSSECURE") < 0) {
+-                                log_error_errno(errno, "Failed to uset environment variable LESSSECURE: %m");
+-                                _exit(EXIT_FAILURE);
+-                        }
+-                } else {
+-                        /* Set env var otherwise */
+-                        if (r < 0)
+-                                log_warning_errno(r, "Unable to parse $SYSTEMD_LESSSECURE, ignoring: %m");
++                 * privileged stuff. If the user set $SYSTEMD_PAGERSECURE, trust their configuration of the
++                 * pager. If they didn't, use secure mode when under euid is changed. If $SYSTEMD_PAGERSECURE
++                 * wasn't explicitly set, and we autodetect the need for secure mode, only use the pager we
++                 * know to be good. */
++                use_secure_mode = getenv_bool("SYSTEMD_PAGERSECURE");
++                trust_pager = use_secure_mode >= 0;
+ 
+-                        if (setenv("LESSSECURE", "1", 1) < 0) {
+-                                log_error_errno(errno, "Failed to set environment variable LESSSECURE: %m");
+-                                _exit(EXIT_FAILURE);
+-                        }
++                if (use_secure_mode == -ENXIO) {
++                        uid_t uid;
++
++                        r = pg_pid_get_owner_uid(0, &uid);
++                        if (r < 0)
++                                log_debug_errno(r, "pg_pid_get_owner_uid() failed, enabling pager secure mode: %m");
++
++                        use_secure_mode = r < 0 || uid != geteuid();
++
++                } else if (use_secure_mode < 0) {
++                        log_warning_errno(use_secure_mode, "Unable to parse $SYSTEMD_PAGERSECURE, assuming true: %m");
++                        use_secure_mode = true;
+                 }
+ 
+-                if (pager) {
++                /* We generally always set variables used by less, even if we end up using a different pager.
++                 * They shouldn't hurt in any case, and ideally other pagers would look at them too. */
++                if (use_secure_mode)
++                        r = setenv("LESSSECURE", "1", 1);
++                else
++                        r = unsetenv("LESSSECURE");
++                if (r < 0) {
++                        log_error_errno(errno, "Failed to adjust environment variable LESSSECURE: %m");
++                        _exit(EXIT_FAILURE);
++                }
++
++                if (trust_pager && pager) { /* The pager config might be set globally, and we cannot
++                                                  * know if the user adjusted it to be appropriate for the
++                                                  * secure mode. Thus, start the pager specified through
++                                                  * envvars only when $SYSTEMD_PAGERSECURE was explicitly set
++                                                  * as well. */
+                         execlp(pager, pager, NULL);
+                         execl("/bin/sh", "sh", "-c", pager, NULL);
+                 }
+ 
+-                /* Debian's alternatives command for pagers is
+-                 * called 'pager'. Note that we do not call
+-                 * sensible-pagers here, since that is just a
+-                 * shell script that implements a logic that
+-                 * is similar to this one anyway, but is
+-                 * Debian-specific. */
+-                execlp("pager", "pager", NULL);
++                /* Debian's alternatives command for pagers is called 'pager'. Note that we do not call
++                 * sensible-pagers here, since that is just a shell script that implements a logic that is
++                 * similar to this one anyway, but is Debian-specific. */
++                FOREACH_STRING(exe, "pager", "less", "more") {
++                        /* Only less implements secure mode right now. */
++                        if (use_secure_mode && !streq(exe, "less"))
++                                continue;
+ 
+-                execlp("less", "less", NULL);
+-                execlp("more", "more", NULL);
++                        execlp(exe, exe, NULL);
++                }
+ 
+                 pager_fallback();
+                 /* not reached */
+-- 
+1.8.3.1
+

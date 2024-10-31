@@ -1,0 +1,11 @@
+SOURCES/0147-LSB-always-add-network-online.target-to-services-wit.patch
+SOURCES/0512-units-introduce-getty-pre.target-6667.patch
+SOURCES/0535-units-add-remote-cryptsetup.target-and-remote-crypts.patch
+SOURCES/0565-units-make-remote-cryptsetup.target-also-after-crypt.patch
+SOURCES/systemd-219.tar.gz
+SOURCES/0266-test-sysv-generator-Check-for-network-online.target.patch
+SOURCES/0418-tmp.mount.hm4-After-swap.target-3087.patch
+SOURCES/0533-units-order-cryptsetup-pre.target-before-cryptsetup..patch
+SOURCES/0536-cryptsetup-generator-use-remote-cryptsetup.target-wh.patch
+SOURCES/0562-units-add-Install-section-to-remote-cryptsetup.targe.patch
+SOURCES/0563-units-replace-remote-cryptsetup-pre.target-with-remo.patch

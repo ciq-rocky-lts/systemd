@@ -1,0 +1,11 @@
+f97080f2be6a282773601b55ed56cb1c47a6c8b63e481a60e734e84b6958d99d SOURCES/0536-cryptsetup-generator-use-remote-cryptsetup.target-wh.patch
+d758e8252353802e518d5fb59ee873c22d98bc432077a48dd2109fc93b7d2111 SOURCES/0562-units-add-Install-section-to-remote-cryptsetup.targe.patch
+961eb59ffeeba1b7f66e803153a772188399bb7f52638c46e0c933c27446193c SOURCES/0563-units-replace-remote-cryptsetup-pre.target-with-remo.patch
+3aa82f3a4fe0190c13c235e188ceaf8fb42336cac466a13643e587f5db80fb11 SOURCES/0565-units-make-remote-cryptsetup.target-also-after-crypt.patch
+0c0e93b0f3a4ec12d4fe3a18694f6ddcba12d9e71e58bcb6db8bdf80d6c2bb1e SOURCES/systemd-219.tar.gz
+78011f4a7c8181b54e6e900877190622e0291edad18ee93470fbd8a84eb786ad SOURCES/0266-test-sysv-generator-Check-for-network-online.target.patch
+b801d2eb3db803e94b4158900ec981b09c23741fa664eacc8eecdbd256ff2013 SOURCES/0418-tmp.mount.hm4-After-swap.target-3087.patch
+0c6c4578f3e8a0914a870ef4f20fe0d1b48c039a996656bc17e60c62ca5da5f2 SOURCES/0533-units-order-cryptsetup-pre.target-before-cryptsetup..patch
+33f097a0f6771c5c4ee036e9e3c5ce7154b07b730d520cd744249d3fb72d4eda SOURCES/0147-LSB-always-add-network-online.target-to-services-wit.patch
+1cc8e946011113a3a89fc50b35809615cb883b69f83954d9eb3ddd96729a705d SOURCES/0512-units-introduce-getty-pre.target-6667.patch
+11be1114f26159905d2a096ff7913e5b847401be7e16a9b778c757cb8ef90717 SOURCES/0535-units-add-remote-cryptsetup.target-and-remote-crypts.patch
