@@ -1,0 +1,229 @@
+From a305650537436ed7b0a5f3b79ab1a80ffdcf727a Mon Sep 17 00:00:00 2001
+From: Matt Hink <mhink@ciq.com>
+Date: Thu, 3 Oct 2024 10:45:52 -0700
+Subject: [PATCH] Don't GC unit if it is in another queue
+
+Based off of this upstream PR:
+https://github.com/redhat-plumbers/systemd-rhel9/pull/299/files
+---
+ BUILD/systemd-252/src/core/cgroup.c           |  6 ++-
+ BUILD/systemd-252/src/core/dbus-job.c         |  3 ++
+ BUILD/systemd-252/src/core/dbus-unit.c        |  3 ++
+ BUILD/systemd-252/src/core/job.c              |  4 ++
+ BUILD/systemd-252/src/core/scope.c            |  5 --
+ BUILD/systemd-252/src/core/service.c          |  3 +-
+ BUILD/systemd-252/src/core/unit.c             | 10 ++++
+ BUILD/systemd-252/src/test/test-execute.c     | 14 ++++++
+ .../test/units/testsuite-19.cleanup-slice.sh  | 49 +++++++++++++++++++
+ 9 files changed, 89 insertions(+), 8 deletions(-)
+ create mode 100644 BUILD/systemd-252/test/units/testsuite-19.cleanup-slice.sh
+
+diff --git a/src/core/cgroup.c b/src/core/cgroup.c
+index c449668..7d6b111 100644
+--- a/src/core/cgroup.c
++++ b/src/core/cgroup.c
+@@ -3007,7 +3007,9 @@ static int on_cgroup_empty_event(sd_event_source *s, void *userdata) {
+ 
+         unit_add_to_gc_queue(u);
+ 
+-        if (UNIT_VTABLE(u)->notify_cgroup_empty)
++        if (IN_SET(unit_active_state(u), UNIT_INACTIVE, UNIT_FAILED))
++                unit_prune_cgroup(u);
++        else if (UNIT_VTABLE(u)->notify_cgroup_empty)
+                 UNIT_VTABLE(u)->notify_cgroup_empty(u);
+ 
+         return 0;
+@@ -3182,6 +3184,8 @@ static int on_cgroup_oom_event(sd_event_source *s, void *userdata) {
+         }
+ 
+         (void) unit_check_oom(u);
++        unit_add_to_gc_queue(u);
++
+         return 0;
+ }
+ 
+diff --git a/src/core/dbus-job.c b/src/core/dbus-job.c
+index 9792a5c..c88d8c2 100644
+--- a/src/core/dbus-job.c
++++ b/src/core/dbus-job.c
+@@ -241,6 +241,9 @@ void bus_job_send_change_signal(Job *j) {
+         if (j->in_dbus_queue) {
+                 LIST_REMOVE(dbus_queue, j->manager->dbus_job_queue, j);
+                 j->in_dbus_queue = false;
++
++                /* The job might be good to be GC once its pending signals have been sent */
++                job_add_to_gc_queue(j);
+         }
+ 
+         r = bus_foreach_bus(j->manager, j->bus_track, j->sent_dbus_new_signal ? send_changed_signal : send_new_signal, j);
+diff --git a/src/core/dbus-unit.c b/src/core/dbus-unit.c
+index 19a71b6..743e80f 100644
+--- a/src/core/dbus-unit.c
++++ b/src/core/dbus-unit.c
+@@ -1628,6 +1628,9 @@ void bus_unit_send_change_signal(Unit *u) {
+         if (u->in_dbus_queue) {
+                 LIST_REMOVE(dbus_queue, u->manager->dbus_unit_queue, u);
+                 u->in_dbus_queue = false;
++
++                /* The unit might be good to be GC once its pending signals have been sent */
++                unit_add_to_gc_queue(u);
+         }
+ 
+         if (!u->id)
+diff --git a/src/core/job.c b/src/core/job.c
+index 032554a..bd3a741 100644
+--- a/src/core/job.c
++++ b/src/core/job.c
+@@ -1407,6 +1407,10 @@ bool job_may_gc(Job *j) {
+         if (!UNIT_VTABLE(j->unit)->gc_jobs)
+                 return false;
+ 
++        /* Make sure to send out pending D-Bus events before we unload the unit */
++        if (j->in_dbus_queue)
++                return false;
++
+         if (sd_bus_track_count(j->bus_track) > 0)
+                 return false;
+ 
+diff --git a/src/core/scope.c b/src/core/scope.c
+index e2fc4cc..087ac28 100644
+--- a/src/core/scope.c
++++ b/src/core/scope.c
+@@ -628,11 +628,6 @@ static void scope_notify_cgroup_empty_event(Unit *u) {
+ 
+         if (IN_SET(s->state, SCOPE_RUNNING, SCOPE_ABANDONED, SCOPE_STOP_SIGTERM, SCOPE_STOP_SIGKILL))
+                 scope_enter_dead(s, SCOPE_SUCCESS);
+-
+-        /* If the cgroup empty notification comes when the unit is not active, we must have failed to clean
+-         * up the cgroup earlier and should do it now. */
+-        if (IN_SET(s->state, SCOPE_DEAD, SCOPE_FAILED))
+-                unit_prune_cgroup(u);
+ }
+ 
+ static void scope_notify_cgroup_oom_event(Unit *u, bool managed_oom) {
+diff --git a/src/core/service.c b/src/core/service.c
+index 1e14cdc..c7db050 100644
+--- a/src/core/service.c
++++ b/src/core/service.c
+@@ -3402,8 +3402,7 @@ static void service_notify_cgroup_empty_event(Unit *u) {
+ 
+         /* If the cgroup empty notification comes when the unit is not active, we must have failed to clean
+          * up the cgroup earlier and should do it now. */
+-        case SERVICE_DEAD:
+-        case SERVICE_FAILED:
++        case SERVICE_AUTO_RESTART:
+                 unit_prune_cgroup(u);
+                 break;
+ 
+diff --git a/src/core/unit.c b/src/core/unit.c
+index 0d1a590..466043f 100644
+--- a/src/core/unit.c
++++ b/src/core/unit.c
+@@ -417,6 +417,16 @@ bool unit_may_gc(Unit *u) {
+         if (u->perpetual)
+                 return false;
+ 
++        /* if we saw a cgroup empty event for this unit, stay around until we processed it so that we remove
++         * the empty cgroup if possible. Similar, process any pending OOM events if they are already queued
++         * before we release the unit. */
++        if (u->in_cgroup_empty_queue || u->in_cgroup_oom_queue)
++                return false;
++
++        /* Make sure to send out D-Bus events before we unload the unit */
++        if (u->in_dbus_queue)
++                return false;
++
+         if (sd_bus_track_count(u->bus_track) > 0)
+                 return false;
+ 
+diff --git a/src/test/test-execute.c b/src/test/test-execute.c
+index 0283cae..513f7d6 100644
+--- a/src/test/test-execute.c
++++ b/src/test/test-execute.c
+@@ -203,6 +203,17 @@ static bool is_inaccessible_available(void) {
+         return true;
+ }
+ 
++static void start_parent_slices(Unit *unit) {
++        Unit *slice;
++
++        slice = UNIT_GET_SLICE(unit);
++        if (slice) {
++                start_parent_slices(slice);
++                int r = unit_start(slice, NULL);
++                assert_se(r >= 0 || r == -EALREADY);
++        }
++}
++
+ static void _test(const char *file, unsigned line, const char *func,
+                   Manager *m, const char *unit_name, int status_expected, int code_expected) {
+         Unit *unit;
+@@ -210,6 +221,9 @@ static void _test(const char *file, unsigned line, const char *func,
+         assert_se(unit_name);
+ 
+         assert_se(manager_load_startable_unit_or_warn(m, unit_name, NULL, &unit) >= 0);
++        /* We need to start the slices as well otherwise the slice cgroups might be pruned
++         * in on_cgroup_empty_event. */
++        start_parent_slices(unit);
+         assert_se(unit_start(unit, NULL) >= 0);
+         check_main_result(file, line, func, m, unit, status_expected, code_expected);
+ }
+diff --git a/test/units/testsuite-19.cleanup-slice.sh b/test/units/testsuite-19.cleanup-slice.sh
+new file mode 100644
+index 0000000..b3f5af0
+--- /dev/null
++++ b/test/units/testsuite-19.cleanup-slice.sh
+@@ -0,0 +1,49 @@
++#!/usr/bin/env bash
++# SPDX-License-Identifier: LGPL-2.1-or-later
++set -eux
++set -o pipefail
++
++# shellcheck source=test/units/util.sh
++. "$(dirname "$0")"/util.sh
++
++export SYSTEMD_LOG_LEVEL=debug
++
++# Create service with KillMode=none inside a slice
++cat <<EOF >/run/systemd/system/test19cleanup.service
++[Unit]
++Description=Test 19 cleanup Service
++[Service]
++Slice=test19cleanup.slice
++Type=exec
++ExecStart=sleep infinity
++KillMode=none
++EOF
++cat <<EOF >/run/systemd/system/test19cleanup.slice
++[Unit]
++Description=Test 19 cleanup Slice
++EOF
++
++# Start service
++systemctl start test19cleanup.service
++assert_rc 0 systemd-cgls /test19cleanup.slice
++
++pid=$(systemctl show --property MainPID --value test19cleanup)
++ps "$pid"
++
++# Stop slice
++# The sleep process will not be killed because of KillMode=none
++# Since there is still a process running under it, the /test19cleanup.slice cgroup won't be removed
++systemctl stop test19cleanup.slice
++
++ps "$pid"
++
++# Kill sleep process manually
++kill -s TERM "$pid"
++while kill -0 "$pid" 2>/dev/null; do sleep 0.1; done
++
++timeout 30 bash -c 'while systemd-cgls /test19cleanup.slice/test19cleanup.service >& /dev/null; do sleep .5; done'
++assert_rc 1 systemd-cgls /test19cleanup.slice/test19cleanup.service
++
++# Check that empty cgroup /test19cleanup.slice has been removed
++timeout 30 bash -c 'while systemd-cgls /test19cleanup.slice >& /dev/null; do sleep .5; done'
++assert_rc 1 systemd-cgls /test19cleanup.slice
+\ No newline at end of file
+-- 
+2.43.5
+
