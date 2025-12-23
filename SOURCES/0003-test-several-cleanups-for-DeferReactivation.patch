@@ -1,0 +1,132 @@
+From 0844968ac29ee2259e7db911b6dbe548dbcd3c04 Mon Sep 17 00:00:00 2001
+From: Yu Watanabe <watanabe.yu+github@gmail.com>
+Date: Wed, 30 Jul 2025 09:51:55 +0900
+Subject: [PATCH 3/3] test: several cleanups for DeferReactivation=
+
+- move to TEST-07-PID1, as it is a timer setting,
+- rename the timer and service, to emphasize they are for testing
+  DeferReactivation=,
+- use timeout command to wait for the timer being triggered several times,
+- stop the timer when not necessary,
+- accept 9 seconds as delta, as there are fluctuations.
+
+Fixes the following failure:
+```
+TEST-74-AUX-UTILS.sh[422]: + last=
+TEST-74-AUX-UTILS.sh[422]: + read -r time
+TEST-74-AUX-UTILS.sh[422]: + '[' -n '' ']'
+TEST-74-AUX-UTILS.sh[422]: + last=1753779616
+TEST-74-AUX-UTILS.sh[422]: + read -r time
+TEST-74-AUX-UTILS.sh[422]: + '[' -n 1753779616 ']'
+TEST-74-AUX-UTILS.sh[422]: + delta=9
+TEST-74-AUX-UTILS.sh[422]: + '[' 9 -lt 10 ']'
+TEST-74-AUX-UTILS.sh[422]: + echo 'Timer fired too early: 9 < 10'
+```
+
+Fixes #38403.
+
+Signed-off-by: Pratham Patel <ppatel@ciq.com>
+---
+ test/meson.build                              |  3 ++
+ test/units/testsuite-77.service               |  8 +++++
+ test/units/testsuite-77.sh                    | 30 +++++++++++++++++++
+ .../testsuite-77-defer-reactivation.service   |  6 ++++
+ .../testsuite-77-defer-reactivation.timer     |  7 +++++
+ 5 files changed, 54 insertions(+)
+ create mode 100644 test/units/testsuite-77.service
+ create mode 100644 test/units/testsuite-77.sh
+ create mode 100644 test/units/testsuite-77.units/testsuite-77-defer-reactivation.service
+ create mode 100644 test/units/testsuite-77.units/testsuite-77-defer-reactivation.timer
+
+diff --git a/test/meson.build b/test/meson.build
+index 3ca544690a84..1a76eda13415 100644
+--- a/test/meson.build
++++ b/test/meson.build
+@@ -63,6 +63,9 @@ if install_tests
+         install_subdir('testsuite-63.units',
+                        exclude_files : '.gitattributes',
+                        install_dir : testdata_dir)
++        install_subdir('testsuite-77.units',
++                       exclude_files : '.gitattributes',
++                       install_dir : testdata_dir)
+ 
+         install_data(kbd_model_map,
+                      install_dir : testdata_dir + '/test-keymap-util')
+diff --git a/test/units/testsuite-77.service b/test/units/testsuite-77.service
+new file mode 100644
+index 000000000000..43abeb637618
+--- /dev/null
++++ b/test/units/testsuite-77.service
+@@ -0,0 +1,8 @@
++# SPDX-License-Identifier: LGPL-2.1-or-later
++[Unit]
++Description=TEST-77-DEFER-REACTIVATION
++
++[Service]
++ExecStartPre=rm -f /failed /testok
++ExecStart=/usr/lib/systemd/tests/testdata/units/%N.sh
++Type=oneshot
+diff --git a/test/units/testsuite-77.sh b/test/units/testsuite-77.sh
+new file mode 100644
+index 000000000000..11219504fee9
+--- /dev/null
++++ b/test/units/testsuite-77.sh
+@@ -0,0 +1,30 @@
++#!/usr/bin/env bash
++# SPDX-License-Identifier: LGPL-2.1-or-later
++# shellcheck disable=SC2016
++set -eux
++set -o pipefail
++
++systemctl start testsuite-77-defer-reactivation.timer
++
++timeout 20 bash -c 'until [[ -e /tmp/defer-reactivation.log ]]; do sleep .5; done'
++timeout 60 bash -c 'until (( $(cat /tmp/defer-reactivation.log | wc -l) >= 3 )); do sleep 5; done'
++
++systemctl stop testsuite-77-defer-reactivation.timer
++
++# If the 'date' command is the service called instantaneously when the timer is triggered, each time delta
++# must be 10 seconds. But in a realistic situation, the command is slightly delayed after the timer is
++# triggered, and the delay has some fluctuations. If a trigger event calls the command at 00:00:01.01, and
++# the next event does at 00:00:10.99, the delta is calculated as 9 seconds. So, let's accept 9 here.
++mindelta=9
++
++last=
++while read -r time; do
++    if [[ -n "$last" ]]; then
++        delta=$(( time - last ))
++        if (( delta < mindelta )); then
++            echo "Timer fired too early: $delta < $mindelta" >/failed
++            exit 1
++        fi
++    fi
++    last=$time
++done </tmp/defer-reactivation.log
+diff --git a/test/units/testsuite-77.units/testsuite-77-defer-reactivation.service b/test/units/testsuite-77.units/testsuite-77-defer-reactivation.service
+new file mode 100644
+index 000000000000..9c7332d6c994
+--- /dev/null
++++ b/test/units/testsuite-77.units/testsuite-77-defer-reactivation.service
+@@ -0,0 +1,6 @@
++[Unit]
++Description=Test for DeferReactivation=yes (service)
++
++[Service]
++Type=simple
++ExecStart=sh -c 'date +%%s >>/tmp/defer-reactivation.log; sleep 5'
+diff --git a/test/units/testsuite-77.units/testsuite-77-defer-reactivation.timer b/test/units/testsuite-77.units/testsuite-77-defer-reactivation.timer
+new file mode 100644
+index 000000000000..4fe56b17da2e
+--- /dev/null
++++ b/test/units/testsuite-77.units/testsuite-77-defer-reactivation.timer
+@@ -0,0 +1,7 @@
++[Unit]
++Description=Test for DeferReactivation=yes (timer)
++
++[Timer]
++OnCalendar=*:*:0/5
++AccuracySec=1us
++DeferReactivation=yes
+-- 
+2.52.0
+
