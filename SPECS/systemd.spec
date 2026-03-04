@@ -21,7 +21,7 @@
 Name: systemd
 Url: https://systemd.io
 Version: 252
-Release: 52%{?dist}.1
+Release: 52%{?dist}.2
 # For a breakdown of the licensing, see README
 License: LGPLv2+ and MIT and GPLv2+
 Summary: System and Service Manager
@@ -2091,6 +2091,9 @@ systemd-hwdb update &>/dev/null || :
 %{_prefix}/lib/dracut/modules.d/70rhel-net-naming-sysattrs/*
 
 %changelog
+* Tue Mar 03 2026 Jeff Uphoff <juphoff@ciq.com> - 252-52.2
+- Increment release for multilib i686 rebuild
+
 * Thu Dec 18 2025 <ppatel@ciq.com> - 252-52.1
 - Backport patches to add functionality for `DeferReactivation` setting
 
